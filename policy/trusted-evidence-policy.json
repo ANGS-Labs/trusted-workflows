@@ -1,9 +1,9 @@
 {
   "schema_version": "1.0.0",
-  "policy_id": "angs-platform-m4-pilot",
+  "policy_id": "angs-public-m4-pilot",
   "repository": {
-    "id": 1391985150,
-    "full_name": "ANGS-Labs/angs-platform",
+    "id": 1392176629,
+    "full_name": "ANGS-Labs/angs-pilot",
     "owner_id": 334837129
   },
   "candidate_event": "merge_group",

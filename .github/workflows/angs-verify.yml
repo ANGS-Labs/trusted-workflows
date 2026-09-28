@@ -93,7 +93,7 @@ jobs:
       # Digests bind the operator-owned policy, profile, and toolchain documents.
       ANGS_TRUSTED_RUNNER_URL: https://wuchengjiemacbook-pro.taile35747.ts.net
       ANGS_OIDC_AUDIENCE: https://wuchengjiemacbook-pro.taile35747.ts.net
-      ANGS_POLICY_DIGEST: 8ee8028d879de3ba4beebf449c7221e65b2d1f78a51eceedb71fddde6dc9382f
+      ANGS_POLICY_DIGEST: 8ae3d97025c834f5c828ca24fff4263b5248dc6b73489d53aa37ce446548fc3b
       ANGS_PROFILE_DIGEST: f679f53882809324c546215394ad5ba346ae75a44cc4a5d5dd8fffbd61c1ad5b
       ANGS_TOOLCHAIN_DIGEST: b42a235a2711530303df7471d474ebe8ddfcbfba25693c6f3b82da3e9016bca1
     steps:
