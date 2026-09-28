@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0.0",
+  "id": "project-tests",
+  "command": [
+    "go",
+    "test",
+    "./...",
+    "-json"
+  ],
+  "requirements": [
+    "AC_TESTS",
+    "REGRESSION_TESTS"
+  ],
+  "allowed_platforms": [
+    "LINUX_AMD64"
+  ],
+  "minimum_test_count": 1,
+  "maximum_duration_seconds": 1800,
+  "maximum_evidence_age_seconds": 3600
+}
