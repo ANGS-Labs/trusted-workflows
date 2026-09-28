@@ -1,0 +1,138 @@
+name: ANGS trusted evidence handoff
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  observe-candidate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Fetch the exact candidate without persisting credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir source
+          cd source
+          git init --quiet
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          auth_header="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic ${auth_header}" fetch --depth=1 origin "${GITHUB_SHA}"
+          unset auth_header GH_TOKEN
+          git checkout --detach FETCH_HEAD
+
+      - name: Run the operator-defined verification profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p trusted-evidence
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          set +e
+          (cd source && go test ./... -json) >trusted-evidence/test-output.json 2>&1
+          exit_code=$?
+          set -e
+          finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          test_count="$(python3 - <<'PY'
+          import json
+          tests = set()
+          with open('trusted-evidence/test-output.json', encoding='utf-8') as stream:
+              for line in stream:
+                  try:
+                      value = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if value.get('Test') and value.get('Action') in {'pass', 'fail'}:
+                      tests.add((value.get('Package', ''), value['Test']))
+          print(len(tests))
+          PY
+          )"
+          artifact_sha256="$(sha256sum trusted-evidence/test-output.json | awk '{print $1}')"
+          status=PASSED
+          if [ "${exit_code}" -ne 0 ]; then status=FAILED; fi
+          python3 - "${started_at}" "${finished_at}" "${exit_code}" "${test_count}" "${status}" "${artifact_sha256}" <<'PY'
+          import json, sys
+          started, finished, exit_code, count, status, digest = sys.argv[1:]
+          with open('trusted-evidence/observation.json', 'w', encoding='utf-8') as stream:
+              json.dump({
+                  'started_at': started,
+                  'finished_at': finished,
+                  'exit_code': int(exit_code),
+                  'test_count': int(count),
+                  'status': status,
+                  'artifact_sha256': digest,
+              }, stream, separators=(',', ':'))
+          PY
+
+      - name: Transfer only the bounded observation to the identity job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: angs-trusted-evidence
+          path: trusted-evidence/
+          retention-days: 1
+          if-no-files-found: error
+
+  attest-evidence:
+    needs: observe-candidate
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      id-token: write
+    env:
+      # Deployment blockers: replace every value before this draft is merged.
+      ANGS_TRUSTED_RUNNER_URL: https://angs-trusted.example.invalid
+      ANGS_OIDC_AUDIENCE: https://angs-trusted.example.invalid
+      ANGS_POLICY_DIGEST: 0000000000000000000000000000000000000000000000000000000000000000
+      ANGS_PROFILE_DIGEST: 0000000000000000000000000000000000000000000000000000000000000000
+      ANGS_TOOLCHAIN_DIGEST: 0000000000000000000000000000000000000000000000000000000000000000
+    steps:
+      - name: Receive the observation without executing candidate code
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: angs-trusted-evidence
+          path: trusted-evidence/
+
+      - name: Build a profile-bound evidence request
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, uuid
+          with open('trusted-evidence/observation.json', encoding='utf-8') as stream:
+              observed = json.load(stream)
+          submission = {
+              'schema_version': '1.0.0',
+              'candidate_sha': os.environ['GITHUB_SHA'],
+              'policy_digest': os.environ['ANGS_POLICY_DIGEST'],
+              'evidence': [{
+                  'evidence_id': str(uuid.uuid4()),
+                  'profile_id': 'project-tests',
+                  'profile_digest': os.environ['ANGS_PROFILE_DIGEST'],
+                  'toolchain_digest': os.environ['ANGS_TOOLCHAIN_DIGEST'],
+                  'platform': 'LINUX_AMD64',
+                  **observed,
+              }],
+          }
+          with open('trusted-evidence/submission.json', 'w', encoding='utf-8') as stream:
+              json.dump(submission, stream, separators=(',', ':'))
+          PY
+
+      - name: Request GitHub OIDC identity and submit trusted evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          token_response="$(curl --fail --silent --show-error \
+            --retry 2 \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${ANGS_OIDC_AUDIENCE}")"
+          oidc_token="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<<"${token_response}")"
+          curl --fail --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer ${oidc_token}" \
+            -H "Content-Type: application/json" \
+            --data-binary @trusted-evidence/submission.json \
+            "${ANGS_TRUSTED_RUNNER_URL}/github/evidence/verify?candidate_sha=${GITHUB_SHA}"
