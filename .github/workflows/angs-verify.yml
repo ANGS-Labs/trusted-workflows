@@ -83,9 +83,9 @@ jobs:
       actions: read
       id-token: write
     env:
-      # Deployment blockers: replace every value before this draft is merged.
-      ANGS_TRUSTED_RUNNER_URL: https://angs-trusted.example.invalid
-      ANGS_OIDC_AUDIENCE: https://angs-trusted.example.invalid
+      # Deployment blockers: replace all zero digests before this draft is merged.
+      ANGS_TRUSTED_RUNNER_URL: https://wuchengjiemacbook-pro.taile35747.ts.net
+      ANGS_OIDC_AUDIENCE: https://wuchengjiemacbook-pro.taile35747.ts.net
       ANGS_POLICY_DIGEST: 0000000000000000000000000000000000000000000000000000000000000000
       ANGS_PROFILE_DIGEST: 0000000000000000000000000000000000000000000000000000000000000000
       ANGS_TOOLCHAIN_DIGEST: 0000000000000000000000000000000000000000000000000000000000000000
