@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "policy_id": "angs-platform-m4-pilot",
+  "repository": {
+    "id": 1391985150,
+    "full_name": "ANGS-Labs/angs-platform",
+    "owner_id": 334837129
+  },
+  "candidate_event": "merge_group",
+  "required_evidence_profile": "project-tests",
+  "requirements": [
+    "AC_TESTS",
+    "REGRESSION_TESTS"
+  ],
+  "identity_check": "ANGS Trusted Identity",
+  "evidence_check": "ANGS Trusted Evidence"
+}
