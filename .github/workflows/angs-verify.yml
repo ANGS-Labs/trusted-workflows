@@ -1,15 +1,23 @@
-name: ANGS trusted evidence handoff
+name: ANGS trusted governance handoff
 
 on:
   workflow_call:
 
 permissions: {}
 
+env:
+  ANGS_TRUSTED_RUNNER_URL: https://wuchengjiemacbook-pro.taile35747.ts.net
+  ANGS_OIDC_AUDIENCE: https://wuchengjiemacbook-pro.taile35747.ts.net
+  ANGS_POLICY_DIGEST: 8ae3d97025c834f5c828ca24fff4263b5248dc6b73489d53aa37ce446548fc3b
+  ANGS_PROFILE_DIGEST: f679f53882809324c546215394ad5ba346ae75a44cc4a5d5dd8fffbd61c1ad5b
+  ANGS_TOOLCHAIN_DIGEST: b42a235a2711530303df7471d474ebe8ddfcbfba25693c6f3b82da3e9016bca1
+
 jobs:
   observe-candidate:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      pull-requests: read
     steps:
       - name: Install the operator-approved Go toolchain
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -18,26 +26,39 @@ jobs:
           check-latest: false
           cache: false
 
-      - name: Fetch the exact candidate without persisting credentials
+      - name: Fetch the exact candidate and authenticated base
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          mkdir source
+          base_sha="$(python3 - <<'PY'
+          import json, os
+          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as stream:
+              event = json.load(stream)
+          if os.environ['GITHUB_EVENT_NAME'] == 'pull_request':
+              print(event['pull_request']['base']['sha'])
+          elif os.environ['GITHUB_EVENT_NAME'] == 'merge_group':
+              print(event['merge_group']['base_sha'])
+          else:
+              raise SystemExit('unsupported event')
+          PY
+          )"
+          [[ "${base_sha}" =~ ^[0-9a-f]{40}$ ]]
+          mkdir source trusted-evidence
           cd source
           git init --quiet
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           auth_header="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')"
-          git -c http.extraheader="AUTHORIZATION: basic ${auth_header}" fetch --depth=1 origin "${GITHUB_SHA}"
+          git -c http.extraheader="AUTHORIZATION: basic ${auth_header}" fetch --depth=2 origin "${GITHUB_SHA}" "${base_sha}"
           unset auth_header GH_TOKEN
-          git checkout --detach FETCH_HEAD
+          git checkout --detach "${GITHUB_SHA}"
+          printf '%s\n' "${base_sha}" >../trusted-evidence/base-sha
 
       - name: Run the operator-defined verification profile
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p trusted-evidence
           started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           set +e
           (cd source && go test ./... -json) >trusted-evidence/test-output.json 2>&1
@@ -75,10 +96,90 @@ jobs:
               }, stream, separators=(',', ':'))
           PY
 
-      - name: Transfer only the bounded observation to the identity job
+      - name: Bind Change and Impact to GitHub's exact PR file set
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess, urllib.request
+
+          root = pathlib.Path('source')
+          base_sha = pathlib.Path('trusted-evidence/base-sha').read_text(encoding='utf-8').strip()
+          candidate_sha = os.environ['GITHUB_SHA']
+          changed = subprocess.check_output(
+              ['git', '-C', str(root), 'diff', '--name-only', '--diff-filter=ACMRD', base_sha, candidate_sha],
+              text=True,
+          ).splitlines()
+          changed = sorted(dict.fromkeys(path for path in changed if path))
+          change_files = [
+              path for path in changed
+              if re.fullmatch(r'\.angs/canonical/changes/[0-9a-f-]+\.json', path)
+              and (root / path).is_file()
+          ]
+          if len(change_files) != 1:
+              raise SystemExit(f'exactly one changed ANGS Change is required, got {change_files!r}')
+          change_path = change_files[0]
+          with (root / change_path).open(encoding='utf-8') as stream:
+              change = json.load(stream)
+          governed_paths = [path for path in changed if path != change_path]
+          if not governed_paths:
+              raise SystemExit('a governance-only change cannot satisfy the pilot')
+
+          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as stream:
+              event = json.load(stream)
+          if os.environ['GITHUB_EVENT_NAME'] == 'pull_request':
+              number = int(event['pull_request']['number'])
+          else:
+              head_ref = event['merge_group']['head_ref']
+              match = re.search(r'/pr-([1-9][0-9]*)-[0-9a-f]{40}$', head_ref)
+              if not match:
+                  raise SystemExit('merge-group PR identity is invalid')
+              number = int(match.group(1))
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/pulls/{number}",
+              headers={
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
+                  'X-GitHub-Api-Version': '2022-11-28',
+              },
+          )
+          with urllib.request.urlopen(request, timeout=20) as response:
+              pull_request = json.load(response)
+          requester = pull_request['user']['login']
+
+          diff = subprocess.check_output(['git', '-C', str(root), 'diff', '--binary', base_sha, candidate_sha])
+          context = {
+              'change': {
+                  'id': change['id'],
+                  'lifecycle': change['lifecycle'],
+                  'intent_summary': change['intent_summary'],
+                  'intent_confirmation': change['intent_confirmation'],
+                  'requester': requester,
+                  'risk': change['risk'],
+                  'acceptance': [item['id'] for item in change['acceptance']],
+                  'scope': change['scope'],
+                  'actual_paths': change['actual_paths'],
+              },
+              'impact': {
+                  'schema_version': '1.0.0',
+                  'candidate_sha': candidate_sha,
+                  'snapshot_digest': hashlib.sha256(diff).hexdigest(),
+                  'changed_paths': governed_paths,
+                  'gate_verdict': 'PASS',
+                  'unknown_reasons': [],
+                  'truncated': False,
+              },
+          }
+          with open('trusted-evidence/governance-context.json', 'w', encoding='utf-8') as stream:
+              json.dump(context, stream, separators=(',', ':'), sort_keys=True)
+          PY
+
+      - name: Transfer only bounded observations to trusted jobs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: angs-trusted-evidence
+          name: angs-trusted-governance
           path: trusted-evidence/
           retention-days: 1
           if-no-files-found: error
@@ -89,18 +190,11 @@ jobs:
     permissions:
       actions: read
       id-token: write
-    env:
-      # Digests bind the operator-owned policy, profile, and toolchain documents.
-      ANGS_TRUSTED_RUNNER_URL: https://wuchengjiemacbook-pro.taile35747.ts.net
-      ANGS_OIDC_AUDIENCE: https://wuchengjiemacbook-pro.taile35747.ts.net
-      ANGS_POLICY_DIGEST: 8ae3d97025c834f5c828ca24fff4263b5248dc6b73489d53aa37ce446548fc3b
-      ANGS_PROFILE_DIGEST: f679f53882809324c546215394ad5ba346ae75a44cc4a5d5dd8fffbd61c1ad5b
-      ANGS_TOOLCHAIN_DIGEST: b42a235a2711530303df7471d474ebe8ddfcbfba25693c6f3b82da3e9016bca1
     steps:
-      - name: Receive the observation without executing candidate code
+      - name: Receive bounded observations without executing candidate code
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: angs-trusted-evidence
+          name: angs-trusted-governance
           path: trusted-evidence/
 
       - name: Build a profile-bound evidence request
@@ -124,22 +218,80 @@ jobs:
                   **observed,
               }],
           }
-          with open('trusted-evidence/submission.json', 'w', encoding='utf-8') as stream:
+          with open('trusted-evidence/evidence-submission.json', 'w', encoding='utf-8') as stream:
               json.dump(submission, stream, separators=(',', ':'))
           PY
 
-      - name: Request GitHub OIDC identity and submit trusted evidence
+      - name: Submit trusted evidence with a job-scoped OIDC identity
         shell: bash
         run: |
           set -euo pipefail
-          token_response="$(curl --fail --silent --show-error \
-            --retry 2 \
+          token_response="$(curl --fail --silent --show-error --retry 2 \
             -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${ANGS_OIDC_AUDIENCE}")"
           oidc_token="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<<"${token_response}")"
           curl --fail-with-body --silent --show-error \
-            -X POST \
-            -H "Authorization: Bearer ${oidc_token}" \
-            -H "Content-Type: application/json" \
-            --data-binary @trusted-evidence/submission.json \
+            -X POST -H "Authorization: Bearer ${oidc_token}" -H "Content-Type: application/json" \
+            --data-binary @trusted-evidence/evidence-submission.json \
             "${ANGS_TRUSTED_RUNNER_URL}/github/evidence/verify?candidate_sha=${GITHUB_SHA}"
+
+  attest-governance:
+    needs: observe-candidate
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      id-token: write
+    steps:
+      - name: Receive bounded observations without executing candidate code
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: angs-trusted-governance
+          path: trusted-evidence/
+
+      - name: Build the composite governance request
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, uuid
+          with open('trusted-evidence/observation.json', encoding='utf-8') as stream:
+              observed = json.load(stream)
+          with open('trusted-evidence/governance-context.json', encoding='utf-8') as stream:
+              context = json.load(stream)
+          evidence = {
+              'schema_version': '1.0.0',
+              'candidate_sha': os.environ['GITHUB_SHA'],
+              'policy_digest': os.environ['ANGS_POLICY_DIGEST'],
+              'evidence': [{
+                  'evidence_id': str(uuid.uuid4()),
+                  'profile_id': 'project-tests',
+                  'profile_digest': os.environ['ANGS_PROFILE_DIGEST'],
+                  'toolchain_digest': os.environ['ANGS_TOOLCHAIN_DIGEST'],
+                  'platform': 'LINUX_AMD64',
+                  **observed,
+              }],
+          }
+          submission = {
+              'schema_version': '1.0.0',
+              'candidate_sha': os.environ['GITHUB_SHA'],
+              'policy_digest': os.environ['ANGS_POLICY_DIGEST'],
+              'change': context['change'],
+              'impact': context['impact'],
+              'evidence': evidence,
+          }
+          with open('trusted-evidence/governance-submission.json', 'w', encoding='utf-8') as stream:
+              json.dump(submission, stream, separators=(',', ':'), sort_keys=True)
+          PY
+
+      - name: Submit full governance with an independent job OIDC identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          token_response="$(curl --fail --silent --show-error --retry 2 \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${ANGS_OIDC_AUDIENCE}")"
+          oidc_token="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<<"${token_response}")"
+          curl --fail-with-body --silent --show-error \
+            -X POST -H "Authorization: Bearer ${oidc_token}" -H "Content-Type: application/json" \
+            --data-binary @trusted-evidence/governance-submission.json \
+            "${ANGS_TRUSTED_RUNNER_URL}/github/governance/verify?candidate_sha=${GITHUB_SHA}"
